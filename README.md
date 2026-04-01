@@ -1,41 +1,62 @@
-# my-agent-config
+﻿# my-agent-config
 
-我的 Antigravity 自定义配置。与 ECC (Everything Claude Code) 配合使用。
+Durable Antigravity configuration with reinstall-safe skills.
 
-## 重建步骤
+## Design Goal
 
-如果重装了 Antigravity 或换了电脑，运行：
+Keep custom skills/workflows/rules after Antigravity reinstall.
+
+## Directory Strategy
+
+Use this 3-layer model:
+
+1. Source layer (Git repo)
+- Example: `C:\Users\ICe\Repos\my-agent-config`
+- Stores your managed config and bootstrap script.
+
+2. Persistent runtime layer
+- `C:\Users\ICe\.agents`
+- This is the long-lived home for `skills`, `workflows`, `rules`.
+
+3. Antigravity compatibility layer
+- `C:\Users\ICe\.gemini\antigravity\skills` (junction)
+- Points to `C:\Users\ICe\.agents\skills`.
+
+Do not use `scratch` as the primary storage for long-lived skills.
+
+## Reinstall SOP (Recommended)
+
+After reinstalling Antigravity:
 
 ```powershell
-# 在 PowerShell 中执行
-cd C:\Users\ICe\.gemini\antigravity\scratch\my-agent-config
+# 1) Go to this repo
+cd C:\Users\ICe\Repos\my-agent-config
+
+# 2) Preview changes
+.\setup.ps1 -DryRun
+
+# 3) Apply changes
 .\setup.ps1
 ```
 
-这会自动：
-1. 恢复自定义 workflows 和 skills
-2. 拉取最新 ECC 并安装到 `.agent/`
+The script is idempotent and safe to run multiple times.
 
-## 目录结构
+## What setup.ps1 does
 
-```
-my-agent-config/
-├── setup.ps1                   # 一键重建脚本
-├── workflows/                  # 自定义 workflows
-│   ├── ai-research.md
-│   ├── humanizer.md
-│   ├── planning-with-files.md
-│   ├── scientific-visualization.md
-│   ├── scientific-writing.md
-│   ├── skills-cli.md
-│   ├── superpowers.md
-│   └── ui-ux-pro-max.md
-├── AcademicForge/              # 自定义 skill
-├── awesome-ai-research-writing/
-├── skill/
-└── ui-ux-pro-max-skill/
+- Ensures persistent dirs exist under `C:\Users\ICe\.agents`
+- Syncs repo-managed `workflows/skills/rules` (if present)
+- Syncs custom bundles (`AcademicForge`, `awesome-ai-research-writing`, `skill`, `ui-ux-pro-max-skill`)
+- Ensures `C:\Users\ICe\.gemini\antigravity\skills` is a junction to `C:\Users\ICe\.agents\skills`
+- If an old physical `antigravity\skills` directory exists, it migrates content and creates a timestamped backup before linking
+
+## Verification Commands
+
+```powershell
+Get-Item C:\Users\ICe\.gemini\antigravity\skills | Select-Object FullName,LinkType,Target
+Get-ChildItem C:\Users\ICe\.agents\skills -Recurse -Filter SKILL.md | Measure-Object
 ```
 
-## 依赖
+## Notes
 
-- [Everything Claude Code](https://github.com/affaan-m/everything-claude-code) — 克隆在 `~/.gemini/antigravity/scratch/everything-claude-code/`
+- Keep this repo in a stable path (for example `C:\Users\ICe\Repos\my-agent-config`).
+- You can run `setup.ps1` after any OS migration, machine change, or Antigravity reinstall.

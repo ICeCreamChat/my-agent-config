@@ -1,117 +1,212 @@
-#!/usr/bin/env pwsh
-# setup.ps1 — 一键重建 Antigravity 配置
-#
-# 正确目录: C:\Users\ICe\.agents\  （带 s）
-# Antigravity 通过 .gemini\antigravity\skills junction 指向此处
+﻿#!/usr/bin/env pwsh
+<#
+  Durable bootstrap for Antigravity custom config.
+
+  Goals:
+  1) Keep long-lived assets in ~/.agents
+  2) Recreate Antigravity skills junction after reinstall
+  3) Sync repo-managed workflows/skills/rules and custom bundles
+
+  Usage:
+    .\setup.ps1
+    .\setup.ps1 -DryRun
+#>
+
+[CmdletBinding()]
+param(
+    [string]$RepoPath = '',
+    [string]$AgentsHome = (Join-Path $env:USERPROFILE '.agents'),
+    [string]$AntigravityHome = (Join-Path $env:USERPROFILE '.gemini\antigravity'),
+    [switch]$DryRun
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$AGENTS_DIR = Join-Path $env:USERPROFILE '.agents'
-$SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ECC_DIR = Join-Path $env:USERPROFILE '.gemini\antigravity\scratch\everything-claude-code'
-
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "  Antigravity 配置重建脚本" -ForegroundColor Cyan
-Write-Host "========================================`n" -ForegroundColor Cyan
-
-# --- Step 1: 创建目录 ---
-Write-Host "[1/4] 创建目录结构..." -ForegroundColor Yellow
-foreach ($dir in @('workflows', 'skills', 'rules')) {
-    $path = Join-Path $AGENTS_DIR $dir
-    if (-not (Test-Path $path)) {
-        New-Item -ItemType Directory -Path $path -Force | Out-Null
-        Write-Host "  创建: $dir/"
+if ([string]::IsNullOrWhiteSpace($RepoPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        $RepoPath = $PSScriptRoot
+    }
+    else {
+        $RepoPath = (Get-Location).Path
     }
 }
 
-# --- Step 2: 恢复自定义配置 ---
-Write-Host "`n[2/4] 恢复自定义配置..." -ForegroundColor Yellow
-$workflowsSource = Join-Path $SCRIPT_DIR 'workflows'
-if (Test-Path $workflowsSource) {
-    Get-ChildItem $workflowsSource -File | ForEach-Object {
-        Copy-Item $_.FullName (Join-Path $AGENTS_DIR 'workflows' $_.Name) -Force
-        Write-Host "  workflow: $($_.Name)"
-    }
-}
-foreach ($dir in @('AcademicForge', 'awesome-ai-research-writing', 'skill', 'ui-ux-pro-max-skill')) {
-    $source = Join-Path $SCRIPT_DIR $dir
-    if (Test-Path $source) {
-        Copy-Item $source (Join-Path $AGENTS_DIR $dir) -Recurse -Force
-        Write-Host "  custom: $dir/"
-    }
+function Write-Section {
+    param([string]$Text)
+    Write-Host "`n== $Text ==" -ForegroundColor Cyan
 }
 
-# --- Step 3: 安装 ECC ---
-Write-Host "`n[3/4] 安装 ECC..." -ForegroundColor Yellow
-if (Test-Path $ECC_DIR) {
-    Push-Location $ECC_DIR
+function Invoke-Change {
+    param(
+        [string]$Description,
+        [scriptblock]$Action
+    )
+    if ($DryRun) {
+        Write-Host "[dry-run] $Description" -ForegroundColor Yellow
+        return
+    }
+    Write-Host $Description -ForegroundColor DarkGray
+    & $Action
+}
+
+function Normalize-Path {
+    param([string]$PathValue)
+    if ([string]::IsNullOrWhiteSpace($PathValue)) {
+        return ''
+    }
     try {
-        if (-not (Test-Path 'node_modules')) {
-            Write-Host "  安装 npm 依赖..."
-            & npm install --no-audit --no-fund --loglevel=error
-        }
-        Write-Host "  拉取最新版本..."
-        & git pull --quiet 2>$null
-
-        # ECC 安装到临时 .agent 目录，然后移到 .agents
-        $tempDir = Join-Path $env:TEMP "ecc-install-$(Get-Date -Format 'yyyyMMddHHmmss')"
-        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
-        Push-Location $tempDir
-        & node "$ECC_DIR\scripts\install-apply.js" --target antigravity --profile full 2>$null
-        Pop-Location
-
-        # 从临时目录的 .agent 复制到 .agents
-        $tempAgent = Join-Path $tempDir '.agent'
-        if (Test-Path $tempAgent) {
-            # workflows
-            if (Test-Path "$tempAgent\workflows") {
-                Copy-Item "$tempAgent\workflows\*" (Join-Path $AGENTS_DIR 'workflows') -Force
-            }
-            # skills
-            if (Test-Path "$tempAgent\skills") {
-                $excludeDirs = @('.git','.github','assets','bin','data','docs','lib','scripts','skills')
-                Get-ChildItem "$tempAgent\skills" -Directory | Where-Object { $_.Name -notin $excludeDirs } | ForEach-Object {
-                    Copy-Item $_.FullName (Join-Path $AGENTS_DIR 'skills' $_.Name) -Recurse -Force
-                }
-            }
-            # rules
-            if (Test-Path "$tempAgent\rules") {
-                Copy-Item "$tempAgent\rules\*" (Join-Path $AGENTS_DIR 'rules') -Force
-            }
-            # 清理临时目录
-            Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        Write-Host "  ECC 安装完成!" -ForegroundColor Green
+        return ([System.IO.Path]::GetFullPath($PathValue)).TrimEnd('\\')
     }
-    finally { Pop-Location }
-} else {
-    Write-Host "  ECC 仓库不存在。先运行:" -ForegroundColor Red
-    Write-Host "  git clone https://github.com/affaan-m/everything-claude-code.git `"$ECC_DIR`""
-}
-
-# --- Step 4: 修复缺少 frontmatter 的 workflow ---
-Write-Host "`n[4/4] 修复 workflow 格式..." -ForegroundColor Yellow
-$fixCount = 0
-Get-ChildItem (Join-Path $AGENTS_DIR 'workflows') -File -Filter "*.md" | ForEach-Object {
-    $content = Get-Content $_.FullName -Raw
-    if (-not $content.StartsWith('---')) {
-        $firstLine = (Get-Content $_.FullName -TotalCount 3 | Where-Object { $_ -match '\S' } | Select-Object -First 1) -replace '^#+ ',''
-        if (-not $firstLine) { $firstLine = ($_.BaseName -replace '-',' ') }
-        $newContent = "---`r`ndescription: $firstLine`r`n---`r`n`r`n$content"
-        Set-Content $_.FullName $newContent -NoNewline
-        $fixCount++
+    catch {
+        return $PathValue.TrimEnd('\\')
     }
 }
-Write-Host "  修复了 $fixCount 个文件"
 
-# --- 统计 ---
+function Ensure-Directory {
+    param([string]$PathValue)
+    if (Test-Path -LiteralPath $PathValue) {
+        $item = Get-Item -LiteralPath $PathValue -Force
+        if (-not $item.PSIsContainer) {
+            throw "Path exists but is not a directory: $PathValue"
+        }
+        return
+    }
+    Invoke-Change "Create directory: $PathValue" {
+        New-Item -ItemType Directory -Path $PathValue -Force | Out-Null
+    }
+}
+
+function Copy-FolderChildren {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+    if (-not (Test-Path -LiteralPath $Source)) {
+        return
+    }
+    Ensure-Directory -PathValue $Destination
+    $items = Get-ChildItem -LiteralPath $Source -Force
+    foreach ($item in $items) {
+        $destPath = Join-Path $Destination $item.Name
+        if ($item.PSIsContainer) {
+            Invoke-Change "Copy directory: $($item.FullName) -> $destPath" {
+                Copy-Item -LiteralPath $item.FullName -Destination $destPath -Recurse -Force
+            }
+        }
+        else {
+            Invoke-Change "Copy file: $($item.FullName) -> $destPath" {
+                Copy-Item -LiteralPath $item.FullName -Destination $destPath -Force
+            }
+        }
+    }
+}
+
+function Ensure-AntigravitySkillsJunction {
+    param(
+        [string]$AntigravitySkillsPath,
+        [string]$TargetSkillsPath
+    )
+    $targetCanonical = Normalize-Path -PathValue $TargetSkillsPath
+
+    if (Test-Path -LiteralPath $AntigravitySkillsPath) {
+        $existing = Get-Item -LiteralPath $AntigravitySkillsPath -Force
+        $isLink = [bool]($existing.Attributes -band [IO.FileAttributes]::ReparsePoint)
+        $linkTarget = ''
+        if ($isLink -and $null -ne $existing.Target) {
+            $linkTarget = Normalize-Path -PathValue (($existing.Target -join ''))
+        }
+
+        if ($isLink -and $linkTarget -ieq $targetCanonical) {
+            Write-Host "Junction already correct: $AntigravitySkillsPath -> $TargetSkillsPath" -ForegroundColor Green
+            return
+        }
+
+        if ($isLink) {
+            Invoke-Change "Remove old skills link: $AntigravitySkillsPath" {
+                Remove-Item -LiteralPath $AntigravitySkillsPath -Force
+            }
+        }
+        else {
+            # Preserve existing files before converting to a junction.
+            Copy-FolderChildren -Source $AntigravitySkillsPath -Destination $TargetSkillsPath
+            $backupPath = "$AntigravitySkillsPath.backup.$(Get-Date -Format 'yyyyMMddHHmmss')"
+            Invoke-Change "Backup existing directory: $AntigravitySkillsPath -> $backupPath" {
+                Move-Item -LiteralPath $AntigravitySkillsPath -Destination $backupPath -Force
+            }
+        }
+    }
+
+    Invoke-Change "Create junction: $AntigravitySkillsPath -> $TargetSkillsPath" {
+        New-Item -ItemType Junction -Path $AntigravitySkillsPath -Target $TargetSkillsPath | Out-Null
+    }
+}
+
+$agentsWorkflows = Join-Path $AgentsHome 'workflows'
+$agentsSkills = Join-Path $AgentsHome 'skills'
+$agentsRules = Join-Path $AgentsHome 'rules'
+$antigravitySkills = Join-Path $AntigravityHome 'skills'
+
 Write-Host "`n========================================" -ForegroundColor Cyan
-$wf = (Get-ChildItem (Join-Path $AGENTS_DIR 'workflows') -File -Filter "*.md").Count
-$sk = (Get-ChildItem (Join-Path $AGENTS_DIR 'skills') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'SKILL.md') }).Count
-$ru = (Get-ChildItem (Join-Path $AGENTS_DIR 'rules') -File -Filter "*.md").Count
-Write-Host "  Workflows: $wf" -ForegroundColor Green
-Write-Host "  Skills:    $sk" -ForegroundColor Green
-Write-Host "  Rules:     $ru" -ForegroundColor Green
-Write-Host "  位置: $AGENTS_DIR" -ForegroundColor Green
-Write-Host "========================================`n" -ForegroundColor Cyan
+Write-Host " Durable Antigravity Bootstrap" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+
+Write-Section "Ensure persistent directories"
+Ensure-Directory -PathValue $AgentsHome
+Ensure-Directory -PathValue $agentsWorkflows
+Ensure-Directory -PathValue $agentsSkills
+Ensure-Directory -PathValue $agentsRules
+Ensure-Directory -PathValue $AntigravityHome
+
+Write-Section "Sync repo-managed content"
+$repoWorkflows = Join-Path $RepoPath 'workflows'
+$repoSkills = Join-Path $RepoPath 'skills'
+$repoRules = Join-Path $RepoPath 'rules'
+
+Copy-FolderChildren -Source $repoWorkflows -Destination $agentsWorkflows
+Copy-FolderChildren -Source $repoSkills -Destination $agentsSkills
+Copy-FolderChildren -Source $repoRules -Destination $agentsRules
+
+foreach ($bundle in @('AcademicForge', 'awesome-ai-research-writing', 'skill', 'ui-ux-pro-max-skill')) {
+    $bundlePath = Join-Path $RepoPath $bundle
+    if (Test-Path -LiteralPath $bundlePath) {
+        Invoke-Change "Copy bundle: $bundlePath -> $AgentsHome" {
+            Copy-Item -LiteralPath $bundlePath -Destination $AgentsHome -Recurse -Force
+        }
+    }
+}
+
+Write-Section "Ensure Antigravity compatibility link"
+Ensure-AntigravitySkillsJunction -AntigravitySkillsPath $antigravitySkills -TargetSkillsPath $agentsSkills
+
+Write-Section "Summary"
+$workflowCount = (Get-ChildItem -Path $agentsWorkflows -File -Filter '*.md' -ErrorAction SilentlyContinue).Count
+$skillCount = (Get-ChildItem -Path $agentsSkills -Recurse -File -Filter 'SKILL.md' -ErrorAction SilentlyContinue).Count
+$ruleCount = (Get-ChildItem -Path $agentsRules -File -Filter '*.md' -ErrorAction SilentlyContinue).Count
+
+$linkType = '(missing)'
+$linkTarget = ''
+if (Test-Path -LiteralPath $antigravitySkills) {
+    $linkItem = Get-Item -LiteralPath $antigravitySkills -Force
+    $linkType = if ($linkItem.LinkType) { $linkItem.LinkType } else { 'Directory' }
+    if ($linkItem.Target) {
+        $linkTarget = ($linkItem.Target -join '')
+    }
+}
+
+Write-Host "Repo path:           $RepoPath" -ForegroundColor Green
+Write-Host "Persistent root:     $AgentsHome" -ForegroundColor Green
+Write-Host "Antigravity root:    $AntigravityHome" -ForegroundColor Green
+Write-Host "Antigravity skills:  $antigravitySkills" -ForegroundColor Green
+Write-Host "Link type:           $linkType" -ForegroundColor Green
+Write-Host "Link target:         $linkTarget" -ForegroundColor Green
+Write-Host "Workflows (*.md):    $workflowCount" -ForegroundColor Green
+Write-Host "Skills (SKILL.md):   $skillCount" -ForegroundColor Green
+Write-Host "Rules (*.md):        $ruleCount" -ForegroundColor Green
+
+if ($DryRun) {
+    Write-Host "`nDry run only. Re-run without -DryRun to apply changes." -ForegroundColor Yellow
+}
+else {
+    Write-Host "`nBootstrap complete." -ForegroundColor Cyan
+}
